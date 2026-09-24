@@ -6,6 +6,6 @@
     "name": "agent-budget",
     "source": "./plugins/agent-budget",
     "description": "Plain-English usage and time budgets for terminal coding agents.",
-    "version": "0.1.0"
+    "version": "0.2.0"
   }]
 }

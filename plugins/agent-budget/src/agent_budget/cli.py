@@ -144,7 +144,7 @@ def status(store: Store, budget_id: str | None) -> list[dict]:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Plain-English agent budgets, enforced locally.")
-    root.add_argument("--version", action="version", version="agent-budget 0.1.0")
+    root.add_argument("--version", action="version", version="agent-budget 0.2.0")
     sub = root.add_subparsers(dest="command", required=True)
     reg = sub.add_parser("register", help="Register the current Claude/Codex terminal session")
     reg.add_argument("--hook", action="store_true", help=argparse.SUPPRESS)

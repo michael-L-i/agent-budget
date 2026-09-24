@@ -42,21 +42,17 @@ Restart Codex, review/trust the plugin's session-registration hook when prompted
 then invoke `$budget` and describe your limit. The CLI helper still registers the
 current session when setting a budget if the optional startup hook is disabled.
 
-**Usage reader** — percentage budgets additionally need the
-[CodexBar CLI](https://github.com/steipete/CodexBar/blob/main/docs/cli.md).
-On macOS, install CodexBar and enable **Advanced → Install CLI** in its settings.
-Verify the CLI source works for your current subscription account:
-
-```sh
-codexbar usage --provider claude --source cli --format json
-# Or: --provider codex
-```
+**Usage tracking is built in.** Codex reads its own signed-in account through the
+native app-server API, without starting a model conversation. Claude uses its
+native status-line reports (Claude Code 2.1.251+ and a supported subscription).
+The budget skill enables Claude's bridge on first use, preserving your existing
+status line. Finish a response and retry if Claude has not reported usage yet.
 
 Use one default subscription account per provider. API-key sessions, custom profile
 roots, and account switching during a run are unsupported for percentage budgets.
 Missing quota or account identity is an error, never a guessed allowance.
-Timers do not require CodexBar. The reader makes no generation requests, but may
-need you to finish your provider's normal sign-in before it can report usage.
+Time limits need no usage setup. Claude percentage limits require interactive
+sessions; print mode does not provide status-line reports.
 
 ## Local development or skill-only installation
 
@@ -95,9 +91,10 @@ failure handling, and resumable provider conversations. Stopping ends the select
 CLI process and its local descendants; use the provider's normal resume command
 afterward. It does not promise a clean worktree or interrupt remote jobs.
 
-Percentage budgets use the [CodexBar CLI](https://github.com/steipete/CodexBar)
-as the usage reader. Time-only budgets do not need it. Provider reports and polling
-can lag, so a stopping buffer reduces overshoot but cannot eliminate it.
+Provider reports and polling can lag, so a stopping buffer reduces overshoot but
+cannot eliminate it. Claude reports arrive with status-line updates; repeated
+redraws do not refresh unchanged measurements. Idle sessions or long responses
+without fresh telemetry can therefore trigger a conservative stop.
 
 The watcher polls usage every 30 seconds and checks time every 250 ms. Reports
 older than 90 seconds trigger a stop. A quota reset or uncertain accounting also
@@ -106,7 +103,9 @@ gets three seconds before remaining local processes are killed. Already-running
 remote work and detached/reparented descendants are outside this mechanism.
 
 `cancel` removes a limit and keeps working; `stop` ends its selected sessions.
-Cancel active budgets before uninstalling. Normal watcher termination stops its
+Cancel active budgets before uninstalling. For Claude, ask the skill to restore
+your status line first (`setup claude --restore`, or add `--project` for a project
+installation). Normal watcher termination stops its
 selected sessions, but a force-killed watcher cannot enforce anything. `status`
 reports missing watchers as **UNPROTECTED**. This is a local convenience guard,
 not a security boundary against an agent with your filesystem permissions.
@@ -135,7 +134,7 @@ budget enforces them. SQLite transactions coordinate cancellation and group stat
 Process birth times prevent stale registry entries from targeting reused PIDs.
 
 Provider references: [Claude plugins](https://code.claude.com/docs/en/plugins-reference),
-[Codex hooks](https://learn.chatgpt.com/docs/hooks), and
-[CodexBar's JSON contract](https://github.com/steipete/CodexBar/blob/main/docs/cli.md).
+[Claude status lines](https://code.claude.com/docs/en/statusline), and
+[Codex app-server](https://learn.chatgpt.com/docs/app-server).
 
 MIT licensed.

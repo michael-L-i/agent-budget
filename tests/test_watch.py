@@ -248,3 +248,41 @@ def test_quota_reader_drives_real_stopping(
     budget = arm(store, {"usage": [{"max_additional_percent": 10}]}, [target])
     until(lambda: store.get(budget["id"])["state"] == "stopped")
     assert reason in store.get(budget["id"])["reason"]
+
+
+def test_native_claude_telemetry_drives_stopping(store, workers, tmp_path, monkeypatch):
+    from agent_budget.claude import capture, fetch_claude
+
+    reader = tmp_path / "claude"
+    reader.write_text(
+        f"#!{sys.executable}\nimport json\n"
+        "print(json.dumps({'loggedIn':True,'authMethod':'claude.ai',"
+        "'email':'test@example.invalid','orgId':'test'}))\n"
+    )
+    reader.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    now = time.time()
+    target = workers()
+    unrelated = workers()
+    payload = {
+        "session_id": "native-test-session",
+        "rate_limits": {"seven_day": {"used_percentage": 40, "resets_at": now + 3600}},
+    }
+    capture(store, target, payload, now)
+    snapshot = fetch_claude([target])
+    budget = {
+        "id": uuid.uuid4().hex[:12],
+        "state": "starting",
+        "provider": "claude",
+        "targets": [target],
+        "created_at": now,
+        "snapshot": snapshot,
+        "policy": compile_policy({"usage": [{"max_additional_percent": 10}]}, snapshot, now),
+    }
+    store.save(budget)
+    payload["rate_limits"]["seven_day"]["used_percentage"] = 50
+    capture(store, target, payload, time.time())
+    start(store, budget)
+    until(lambda: store.get(budget["id"])["state"] == "stopped")
+    assert "usage cutoff" in store.get(budget["id"])["reason"]
+    assert psutil.Process(unrelated["pid"]).status() != psutil.STATUS_ZOMBIE

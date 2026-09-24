@@ -3,7 +3,8 @@
 Agent Budget runs locally as your OS user. It has no network listener and accepts
 no remote requests. It stores session process IDs and birth times, working
 directories, constraints, hashed account identities, quota numbers, and stop events
-in a private SQLite database. Credentials stay with the provider and CodexBar.
+in a private SQLite database. Credentials stay with the provider CLIs; Agent Budget does not read tokens.
+Claude bridge configuration privately preserves your prior status-line command.
 
 Only known ancestor Claude/Codex CLI entrypoints can register. Public commands use
 registered session IDs, never arbitrary PIDs. Shared app-server and remote modes
