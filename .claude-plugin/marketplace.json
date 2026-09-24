@@ -1,0 +1,11 @@
+{
+  "name": "agent-budget",
+  "owner": {"name": "Michael Li"},
+  "metadata": {"description": "Plain-English usage and time budgets for coding agents."},
+  "plugins": [{
+    "name": "agent-budget",
+    "source": "./plugins/agent-budget",
+    "description": "Plain-English usage and time budgets for terminal coding agents.",
+    "version": "0.1.0"
+  }]
+}

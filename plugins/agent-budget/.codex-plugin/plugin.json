@@ -1,18 +1,18 @@
 {
   "name": "agent-budget",
   "version": "0.1.0",
-  "description": "Agent Budget plugin",
+  "description": "Set usage and time budgets in plain English for local coding agents.",
   "author": {
-    "name": "Local developer"
+    "name": "Michael Li"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Budget",
-    "shortDescription": "Use Agent Budget in Codex.",
-    "longDescription": "Agent Budget adds a local Codex plugin scaffold.",
-    "developerName": "Local developer",
+    "shortDescription": "Usage and time limits in plain English.",
+    "longDescription": "Set a budget for this terminal session or a group. A local watchdog enforces the first usage or time limit reached.",
+    "developerName": "Michael Li",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Help me use Agent Budget."
+    "defaultPrompt": "Set a budget for this coding session."
   }
 }

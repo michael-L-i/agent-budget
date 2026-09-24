@@ -1,0 +1,9 @@
+{
+  "name": "agent-budget",
+  "version": "0.1.0",
+  "description": "Usage and time budgets in plain English, enforced by a local watchdog.",
+  "author": {"name": "Michael Li"},
+  "homepage": "https://github.com/michael-L-i/agent-budget",
+  "repository": "https://github.com/michael-L-i/agent-budget",
+  "license": "MIT"
+}

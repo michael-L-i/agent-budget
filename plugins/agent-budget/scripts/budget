@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+plugin_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if ! command -v uv >/dev/null 2>&1; then
+    echo 'Agent Budget needs uv. Install it from https://docs.astral.sh/uv/ then retry.' >&2
+    exit 1
+fi
+exec uv run --locked --no-dev --project "$plugin_dir" agent-budget "$@"
