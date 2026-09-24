@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 import psutil
@@ -12,9 +13,17 @@ from .policy import BudgetError
 
 
 def provider_for(executable: str, argv: list[str]) -> str | None:
-    name = Path(executable).name
+    path = Path(executable)
+    name = path.name
     if name in ("claude", "codex"):
         provider = name
+    elif (
+        path.parent.name == "versions"
+        and path.parent.parent.name == "claude"
+        and re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.-]+)?", name)
+    ):
+        # Claude's native installer resolves ~/.local/bin/claude to versions/<version>.
+        provider = "claude"
     elif name in ("node", "nodejs") and len(argv) > 1:
         script = argv[1].replace("\\", "/")
         if script.endswith("/@anthropic-ai/claude-code/cli.js"):
@@ -27,7 +36,7 @@ def provider_for(executable: str, argv: list[str]) -> str | None:
         return None
     # These processes can host several unrelated conversations. Do not kill them.
     if any(
-        arg
+        arg.split("=", 1)[0]
         in {
             "app-server",
             "mcp-server",

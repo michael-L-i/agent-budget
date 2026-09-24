@@ -11,6 +11,8 @@ from agent_budget.processes import provider_for, resolve, stop_targets
     "executable,argv,expected",
     [
         ("/bin/claude", ["claude"], "claude"),
+        ("/home/test/.local/share/claude/versions/2.1.281", ["claude"], "claude"),
+        ("/home/test/.local/share/claude/versions/unrelated", ["claude"], None),
         ("/bin/codex", ["codex", "exec", "task"], "codex"),
         ("/bin/codex", ["codex", "app-server"], None),
         ("/bin/claude", ["claude", "--bg"], None),
