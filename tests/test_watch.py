@@ -119,7 +119,7 @@ def test_stale_meter_stops_instead_of_treating_missing_usage_as_zero(store, work
 
 
 def test_time_limit_remains_live_while_usage_reader_is_hung(store, workers, tmp_path, monkeypatch):
-    reader = tmp_path / "codexbar"
+    reader = tmp_path / "codex"
     reader.write_text("#!/bin/sh\nsleep 60\n")
     reader.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -132,7 +132,7 @@ def test_time_limit_remains_live_while_usage_reader_is_hung(store, workers, tmp_
     budget = {
         "id": uuid.uuid4().hex[:12],
         "state": "starting",
-        "provider": "claude",
+        "provider": "codex",
         "targets": [workers()],
         "created_at": now,
         "snapshot": snapshot,
@@ -221,23 +221,30 @@ def test_quota_reader_drives_real_stopping(
     reason,
 ):
     marker = tmp_path / "sample-count"
-    reader = tmp_path / "codexbar"
+    reader = tmp_path / "codex"
     reader.write_text(
         f"#!{sys.executable}\n"
-        "import json, time\nfrom datetime import datetime, timezone\nfrom pathlib import Path\n"
+        "import sys,json,time\nfrom pathlib import Path\n"
         f"marker = Path({str(marker)!r})\n"
         "second = marker.exists()\nmarker.touch()\n"
-        "def iso(t): return datetime.fromtimestamp(t, timezone.utc).isoformat()\n"
-        # Keep the reset identical between the baseline and subsequent report.
         f"reset = {time.time() + 3600!r}\n"
-        "print(json.dumps([{'provider':'claude', 'usage': {\n"
-        "'updatedAt': iso(time.time()),\n"
-        f"'accountEmail': {second_email!r} if second else 'test@example.invalid',\n"
-        f"'secondary': {{'usedPercent': {second_used} if second else 40,\n"
-        "'windowMinutes':10080, 'resetsAt':iso(reset)}}}]))\n"
+        "for line in sys.stdin:\n"
+        " m=json.loads(line)\n"
+        " if 'id' not in m: continue\n"
+        " result={}\n"
+        " if m['method']=='account/read':\n"
+        f"  email={second_email!r} if second else 'test@example.invalid'\n"
+        "  result={'account':{'type':'chatgpt','email':email}}\n"
+        " if m['method']=='account/rateLimits/read':\n"
+        f"  used={second_used} if second else 40\n"
+        "  result={'rateLimits':{'secondary':{'usedPercent':used,\n"
+        "    'windowDurationMins':10080,'resetsAt':reset}}}\n"
+        " print(json.dumps({'id':m['id'],'result':result}),flush=True)\n"
     )
     reader.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
-    budget = arm(store, {"usage": [{"max_additional_percent": 10}]}, [workers()])
+    target = workers()
+    target["provider"] = "codex"
+    budget = arm(store, {"usage": [{"max_additional_percent": 10}]}, [target])
     until(lambda: store.get(budget["id"])["state"] == "stopped")
     assert reason in store.get(budget["id"])["reason"]

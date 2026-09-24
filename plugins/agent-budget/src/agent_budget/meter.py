@@ -1,96 +1,165 @@
-"""Read real account quota reports; never infer quota from token costs."""
+"""Read native quota telemetry without a third-party monitor or model requests."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import selectors
 import shutil
 import signal
 import subprocess
 import threading
 import time
 
-from .policy import BudgetError, number, timestamp
+from .policy import BudgetError, number
 
 MAX_AGE = 90
 POLL_SECONDS = 30
 
 
-def parse_snapshot(payload: object, provider: str, now: float) -> dict:
-    if not isinstance(payload, list) or len(payload) != 1:
-        raise BudgetError("Expected exactly one usage account from CodexBar.")
-    row = payload[0]
-    if not isinstance(row, dict) or row.get("provider") != provider or row.get("error"):
-        raise BudgetError("CodexBar could not read this provider's usage.")
-    usage = row.get("usage")
-    if not isinstance(usage, dict):
-        raise BudgetError("CodexBar returned no subscription usage.")
-    updated = timestamp(usage.get("updatedAt"))
-    if not -5 <= now - updated <= MAX_AGE:
-        raise BudgetError("Usage report is stale or has an invalid timestamp.")
-    identity = usage.get("identity") or usage
-    email = identity.get("accountEmail")
+def identity(provider: str, email: object, organization: object = "") -> str:
     if not isinstance(email, str) or not email.strip():
-        raise BudgetError("Usage account identity is unavailable; cannot arm a percentage budget.")
-    organization = identity.get("accountOrganization") or ""
-    fingerprint = hashlib.sha256(
-        f"{provider}:{email.strip().lower()}:{organization}".encode()
+        raise BudgetError("The signed-in account could not be identified.")
+    return hashlib.sha256(
+        f"{provider}:{email.strip().lower()}:{organization or ''}".encode()
     ).hexdigest()
+
+
+def window(used: object, resets: object, now: float) -> dict:
+    used = number(used, "reported usage")
+    resets = number(resets, "quota reset timestamp", 0, 1e12)
+    if resets <= now:
+        raise BudgetError("Usage window has expired; waiting for a new report.")
+    return {"used": used, "resets_at": resets}
+
+
+def parse_codex(account: dict, limits: dict, now: float) -> dict:
+    account = account.get("account")
+    if not isinstance(account, dict) or account.get("type") != "chatgpt":
+        raise BudgetError("Sign in to Codex with a ChatGPT subscription to use percentage budgets.")
+    fingerprint = identity("codex", account.get("email"), account.get("chatgptAccountId"))
+    buckets = limits.get("rateLimitsByLimitId")
+    if buckets:
+        # Never silently pick a different model's bucket.
+        bucket = buckets.get("codex")
+    else:
+        bucket = limits.get("rateLimits")
+    if not isinstance(bucket, dict) or bucket.get("limitId") not in (None, "codex"):
+        raise BudgetError("Codex did not expose an unambiguous Codex quota bucket.")
     windows = {}
-    for key in ("primary", "secondary", "tertiary"):
-        window = usage.get(key)
-        if not isinstance(window, dict):
+    for key in ("primary", "secondary"):
+        reading = bucket.get(key)
+        if not isinstance(reading, dict):
             continue
-        # Cadence, not positional order, determines the meaning of a window.
-        name = {300: "five_hour", 10080: "weekly"}.get(window.get("windowMinutes"))
+        name = {300: "five_hour", 10080: "weekly"}.get(reading.get("windowDurationMins"))
         if name is None:
             continue
         if name in windows:
-            raise BudgetError("Ambiguous quota windows in the usage report.")
-        used = number(window.get("usedPercent"), "reported usage")
-        resets = timestamp(window.get("resetsAt"))
-        if resets <= now:
-            raise BudgetError("Usage window has expired; waiting for a new report.")
-        windows[name] = {"used": used, "resets_at": resets}
+            raise BudgetError("Codex returned ambiguous quota windows.")
+        windows[name] = window(reading.get("usedPercent"), reading.get("resetsAt"), now)
     if not windows:
-        raise BudgetError("No supported five-hour or weekly quota window is available.")
-    return {"identity": fingerprint, "updated_at": updated, "windows": windows}
+        raise BudgetError("Codex did not expose a supported five-hour or weekly quota window.")
+    return {"identity": fingerprint, "updated_at": now, "windows": windows}
 
 
-def fetch(provider: str, cancelled: threading.Event | None = None) -> dict:
-    binary = shutil.which("codexbar")
-    if binary is None:
-        raise BudgetError(
-            "Percentage budgets need the CodexBar CLI on PATH. Install CodexBar, then use "
-            "its Advanced settings to install the CLI. Time-only budgets work without it."
+class Rpc:
+    """Bounded JSONL client for the local Codex app-server's read-only account API."""
+
+    def __init__(self, cancelled: threading.Event | None = None):
+        binary = shutil.which("codex")
+        if not binary:
+            raise BudgetError("Codex CLI is not installed or is not on PATH.")
+        self.proc = subprocess.Popen(
+            [binary, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            bufsize=0,
         )
-    # Use the local CLI's authenticated account, not a browser's possibly different account.
-    command = [binary, "usage", "--provider", provider, "--source", "cli", "--format", "json"]
-    with subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    ) as proc:
-        until = time.monotonic() + 15
-        while True:
+        self.cancelled = cancelled
+        self.deadline = time.monotonic() + 15
+        self.buffer = b""
+        self.total = 0
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.proc.stdout, selectors.EVENT_READ)
+
+    def send(self, message: dict):
+        self.proc.stdin.write(json.dumps(message).encode() + b"\n")
+        self.proc.stdin.flush()
+
+    def request(self, method: str, request_id: int, params: dict | None = None) -> dict:
+        self.send({"id": request_id, "method": method, "params": params or {}})
+        while time.monotonic() < self.deadline:
+            if self.cancelled is not None and self.cancelled.is_set():
+                raise BudgetError("Usage read cancelled.")
+            if b"\n" not in self.buffer:
+                if not self.selector.select(timeout=0.1):
+                    continue
+                data = os.read(self.proc.stdout.fileno(), 65536)
+                if not data:
+                    raise BudgetError("Codex usage connection closed before replying.")
+                self.total += len(data)
+                if self.total > 1024 * 1024:
+                    raise BudgetError("Codex usage response exceeded the size limit.")
+                self.buffer += data
+                continue
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            message = json.loads(line)
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                raise BudgetError("Codex could not read usage. Check your CLI version and login.")
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise BudgetError("Unexpected Codex usage response.")
+            return result
+        raise BudgetError("Codex usage read timed out.")
+
+    def close(self):
+        self.selector.close()
+        # This is our private reader process, never an existing agent/app server.
+        if self.proc.poll() is None:
             try:
-                output, _ = proc.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                if time.monotonic() >= until or (cancelled is not None and cancelled.is_set()):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.communicate()
-                    raise BudgetError("Usage reader timed out or was cancelled.") from None
-    if proc.returncode:
-        raise BudgetError("Usage reader failed; check CodexBar and your CLI login.")
-    if len(output) > 1024 * 1024:
-        raise BudgetError("Usage report is unexpectedly large.")
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            self.proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.wait()
+        self.proc.stdin.close()
+        self.proc.stdout.close()
+
+
+def fetch_codex(cancelled: threading.Event | None = None) -> dict:
+    rpc = Rpc(cancelled)
     try:
-        return parse_snapshot(json.loads(output), provider, time.time())
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        if isinstance(exc, BudgetError):
-            raise
-        raise BudgetError("Unrecognized CodexBar usage report; budget cannot be enforced.") from exc
+        rpc.request("initialize", 1, {"clientInfo": {"name": "agent_budget", "version": "0.2.0"}})
+        rpc.send({"method": "initialized", "params": {}})
+        account = rpc.request("account/read", 2, {"refreshToken": False})
+        limits = rpc.request("account/rateLimits/read", 3)
+        return parse_codex(account, limits, time.time())
+    finally:
+        rpc.close()
+
+
+def fetch(
+    provider: str, cancelled: threading.Event | None = None, targets: list[dict] | None = None
+) -> dict:
+    try:
+        if provider == "codex":
+            return fetch_codex(cancelled)
+        if provider == "claude":
+            from .claude import fetch_claude
+
+            return fetch_claude(targets or [], cancelled)
+        raise BudgetError("Unsupported usage provider.")
+    except BudgetError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OSError) as exc:
+        raise BudgetError(
+            f"Could not read native {provider} usage; budget cannot be enforced."
+        ) from exc

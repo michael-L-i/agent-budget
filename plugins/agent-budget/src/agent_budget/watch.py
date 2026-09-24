@@ -17,9 +17,9 @@ from .policy import BudgetError, evaluate
 from .store import Store, state_dir
 
 
-def _read(provider: str, inbox: queue.Queue, cancelled: threading.Event):
+def _read(provider: str, inbox: queue.Queue, cancelled: threading.Event, targets: list[dict]):
     try:
-        inbox.put((meter.fetch(provider, cancelled), None))
+        inbox.put((meter.fetch(provider, cancelled, targets), None))
     except Exception:
         # Do not persist provider stderr, credentials, or arbitrary exception strings.
         inbox.put((None, "Usage reader unavailable."))
@@ -106,7 +106,7 @@ def run(budget_id: str) -> int:
                         next_poll = monotonic + meter.POLL_SECONDS
                         reader = threading.Thread(
                             target=_read,
-                            args=(budget["provider"], inbox, cancel_reader),
+                            args=(budget["provider"], inbox, cancel_reader, budget["targets"]),
                             daemon=True,
                         )
                         reader.start()

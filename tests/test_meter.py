@@ -1,87 +1,119 @@
 import copy
-from datetime import UTC, datetime
+import json
+import sys
+import threading
+import time
 
 import pytest
 
-from agent_budget.meter import parse_snapshot
+from agent_budget import meter
+from agent_budget.meter import parse_codex
 from agent_budget.policy import BudgetError
 
 NOW = 1_800_000_000
 
 
-def iso(value):
-    return datetime.fromtimestamp(value, UTC).isoformat()
+@pytest.fixture
+def account():
+    return {"account": {"type": "chatgpt", "email": "test@example.invalid"}}
 
 
 @pytest.fixture
-def report():
-    # Minimal documented CodexBar usage JSON, with synthetic account and timestamps.
-    return [
-        {
-            "provider": "claude",
-            "usage": {
-                "updatedAt": iso(NOW),
-                "identity": {"accountEmail": "test@example.invalid", "accountOrganization": None},
-                "primary": {"usedPercent": 23, "windowMinutes": 300, "resetsAt": iso(NOW + 100)},
-                "secondary": {
-                    "usedPercent": 40,
-                    "windowMinutes": 10080,
-                    "resetsAt": iso(NOW + 1000),
-                },
-            },
+def limits():
+    return {
+        "rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 23, "windowDurationMins": 300, "resetsAt": NOW + 100},
+            "secondary": {"usedPercent": 40, "windowDurationMins": 10080, "resetsAt": NOW + 1000},
         }
-    ]
+    }
 
 
-def test_real_quota_schema_and_identity_redaction(report):
-    result = parse_snapshot(report, "claude", NOW)
+def test_native_codex_contract_and_redaction(account, limits):
+    result = parse_codex(account, limits, NOW)
     assert result["windows"]["weekly"]["used"] == 40
     assert "test@example.invalid" not in str(result)
 
 
-def test_window_order_does_not_determine_cadence(report):
-    usage = report[0]["usage"]
-    usage["primary"], usage["secondary"] = usage["secondary"], usage["primary"]
-    assert parse_snapshot(report, "claude", NOW)["windows"]["weekly"]["used"] == 40
+def test_cadence_not_position(account, limits):
+    bucket = limits["rateLimits"]
+    bucket["primary"], bucket["secondary"] = bucket["secondary"], bucket["primary"]
+    assert parse_codex(account, limits, NOW)["windows"]["weekly"]["used"] == 40
 
 
 @pytest.mark.parametrize("value", [True, -1, 101, float("nan"), None, "40"])
-def test_invalid_quota_is_not_zero(report, value):
-    report[0]["usage"]["primary"]["usedPercent"] = value
+def test_invalid_quota_fails_closed(account, limits, value):
+    limits["rateLimits"]["primary"]["usedPercent"] = value
     with pytest.raises(BudgetError):
-        parse_snapshot(report, "claude", NOW)
+        parse_codex(account, limits, NOW)
 
 
-def test_stale_and_future_reports_are_rejected(report):
-    for offset in (-91, 6):
-        report[0]["usage"]["updatedAt"] = iso(NOW + offset)
-        with pytest.raises(BudgetError, match="timestamp"):
-            parse_snapshot(report, "claude", NOW)
+def test_unknown_and_ambiguous_windows(account, limits):
+    bucket = limits["rateLimits"]
+    bucket["primary"]["windowDurationMins"] = 1
+    bucket["secondary"]["windowDurationMins"] = None
+    with pytest.raises(BudgetError, match="supported"):
+        parse_codex(account, limits, NOW)
+    bucket["primary"]["windowDurationMins"] = 300
+    bucket["secondary"] = copy.deepcopy(bucket["primary"])
+    with pytest.raises(BudgetError, match="ambiguous"):
+        parse_codex(account, limits, NOW)
 
 
-def test_wrong_provider_multiple_accounts_and_errors_are_rejected(report):
-    for payload, provider in (
-        (report, "codex"),
-        (report * 2, "claude"),
-        ([{"provider": "claude", "error": {"message": "secret"}}], "claude"),
-    ):
-        with pytest.raises(BudgetError):
-            parse_snapshot(payload, provider, NOW)
+def test_never_substitutes_another_bucket(account, limits):
+    limits["rateLimitsByLimitId"] = {"other_model": limits["rateLimits"]}
+    with pytest.raises(BudgetError, match="bucket"):
+        parse_codex(account, limits, NOW)
 
 
-def test_unknown_or_duplicate_windows_are_not_guessed(report):
-    usage = report[0]["usage"]
-    usage["primary"]["windowMinutes"] = 1
-    usage["secondary"]["windowMinutes"] = None
-    with pytest.raises(BudgetError, match="No supported"):
-        parse_snapshot(report, "claude", NOW)
-    usage["primary"]["windowMinutes"] = 300
-    usage["secondary"] = copy.deepcopy(usage["primary"])
-    with pytest.raises(BudgetError, match="Ambiguous"):
-        parse_snapshot(report, "claude", NOW)
+@pytest.mark.parametrize(
+    "account",
+    [{"account": None}, {"account": {"type": "apiKey"}}, {"account": {"type": "chatgpt"}}],
+)
+def test_missing_subscription_identity(account, limits):
+    with pytest.raises(BudgetError):
+        parse_codex(account, limits, NOW)
 
 
-def test_missing_identity_and_expired_window_fail_closed(report):
-    report[0]["usage"]["identity"] = {}
-    with pytest.raises(BudgetError, match="identity"):
-        parse_snapshot(report, "claude", NOW)
+def test_expired_window(account, limits):
+    limits["rateLimits"]["primary"]["resetsAt"] = NOW
+    with pytest.raises(BudgetError, match="expired"):
+        parse_codex(account, limits, NOW)
+
+
+def test_rpc_initialization_order_no_generation_and_cleanup(tmp_path, monkeypatch):
+    transcript = tmp_path / "requests.jsonl"
+    binary = tmp_path / "codex"
+    binary.write_text(
+        f"#!{sys.executable}\nimport sys,json,time\n"
+        f"log=open({str(transcript)!r}, 'w', buffering=1)\n"
+        "for line in sys.stdin:\n"
+        " log.write(line); m=json.loads(line)\n"
+        " if 'id' not in m: continue\n"
+        " result={}\n"
+        " if m['method']=='account/read':\n"
+        "  result={'account':{'type':'chatgpt','email':'t@example.invalid'}}\n"
+        " if m['method']=='account/rateLimits/read':\n"
+        "  result={'rateLimits':{'primary':{'usedPercent':4,\n"
+        "   'windowDurationMins':300,'resetsAt':time.time()+500}}}\n"
+        " print(json.dumps({'id':m['id'],'result':result}),flush=True)\n"
+    )
+    binary.chmod(0o700)
+    monkeypatch.setattr(meter.shutil, "which", lambda _: str(binary))
+    result = meter.fetch_codex()
+    assert result["windows"]["five_hour"]["used"] == 4
+    methods = [json.loads(line)["method"] for line in transcript.read_text().splitlines()]
+    assert methods == ["initialize", "initialized", "account/read", "account/rateLimits/read"]
+
+
+def test_rpc_cancellation_does_not_wait_for_timeout(tmp_path, monkeypatch):
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\nsleep 60\n")
+    binary.chmod(0o700)
+    monkeypatch.setattr(meter.shutil, "which", lambda _: str(binary))
+    cancelled = threading.Event()
+    cancelled.set()
+    started = time.monotonic()
+    with pytest.raises(BudgetError, match="cancelled"):
+        meter.fetch_codex(cancelled)
+    assert time.monotonic() - started < 3

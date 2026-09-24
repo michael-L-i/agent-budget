@@ -42,10 +42,24 @@ class Store:
                 id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL,
                 at REAL NOT NULL, message TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS telemetry (
+                session_id TEXT PRIMARY KEY, data TEXT NOT NULL
+            );
         """)
 
     def close(self):
         self.db.close()
+
+    def telemetry(self, session_id: str) -> dict | None:
+        row = self.db.execute(
+            "SELECT data FROM telemetry WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_telemetry(self, session_id: str, sample: dict):
+        self.db.execute(
+            "INSERT OR REPLACE INTO telemetry VALUES (?, ?)", (session_id, json.dumps(sample))
+        )
 
     @contextmanager
     def transaction(self):

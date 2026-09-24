@@ -55,7 +55,7 @@ def arm(store: Store, spec: dict, targets: list[dict]) -> dict:
             "API keys, custom config roots, and profile overrides are unsupported. "
             "Time-only budgets are still available."
         )
-    snapshot = meter.fetch(targets[0]["provider"]) if normalized["usage"] else None
+    snapshot = meter.fetch(targets[0]["provider"], targets=targets) if normalized["usage"] else None
     policy = compile_policy(spec, snapshot, now)
     if policy["deadline"] is not None and policy["deadline"] <= time.time():
         raise BudgetError("The deadline elapsed during setup; budget not armed.")
@@ -166,6 +166,12 @@ def parser() -> argparse.ArgumentParser:
         cmd.add_argument("budget_id", nargs="?" if command == "status" else None)
         cmd.add_argument("--json", action="store_true")
     sub.add_parser("doctor", help="Check local prerequisites without using any model tokens")
+    setup_cmd = sub.add_parser("setup", help="Enable or restore Claude's native usage bridge")
+    setup_cmd.add_argument("provider", choices=["claude"])
+    setup_cmd.add_argument("--project", action="store_true")
+    setup_cmd.add_argument("--restore", action="store_true")
+    bridge = sub.add_parser("_claude-statusline", help=argparse.SUPPRESS)
+    bridge.add_argument("--config", required=True)
     internal = sub.add_parser("_watch", help=argparse.SUPPRESS)
     internal.add_argument("budget_id")
     return root
@@ -184,12 +190,20 @@ def main() -> int:
             ):
                 raise BudgetError("Invalid budget ID.")
             return watch.run(args.budget_id)
+        if args.command in ("setup", "_claude-statusline"):
+            from . import claude
+
+            if args.command == "setup":
+                print(claude.setup(project=args.project, restore=args.restore))
+            else:
+                claude.statusline(args.config)
+            return 0
         store = Store()
         if args.command == "doctor":
             print(f"Python {sys.version.split()[0]} · private state ready")
-            for name in ("claude", "codex", "codexbar"):
+            for name in ("claude", "codex"):
                 print(f"{name}: {'available' if shutil.which(name) else 'not installed'}")
-            print("CodexBar is only required for percentage budgets. No model calls were made.")
+            print("Usage comes directly from your agent. No monitoring app or model calls needed.")
         elif args.command == "register":
             try:
                 session = register(store)
