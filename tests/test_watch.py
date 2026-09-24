@@ -9,6 +9,7 @@ import uuid
 
 import psutil
 import pytest
+
 from agent_budget.cli import arm, change_state, status
 from agent_budget.policy import BudgetError, compile_policy
 from agent_budget.store import Store
@@ -200,3 +201,43 @@ def test_public_cli_registers_ancestor_and_stops_it(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+@pytest.mark.parametrize(
+    "second_used,second_email,reason",
+    [
+        (50, "test@example.invalid", "usage cutoff"),
+        (41, "changed@example.invalid", "account changed"),
+        (39, "test@example.invalid", "decreased unexpectedly"),
+    ],
+)
+def test_quota_reader_drives_real_stopping(
+    store,
+    workers,
+    tmp_path,
+    monkeypatch,
+    second_used,
+    second_email,
+    reason,
+):
+    marker = tmp_path / "sample-count"
+    reader = tmp_path / "codexbar"
+    reader.write_text(
+        f"#!{sys.executable}\n"
+        "import json, time\nfrom datetime import datetime, timezone\nfrom pathlib import Path\n"
+        f"marker = Path({str(marker)!r})\n"
+        "second = marker.exists()\nmarker.touch()\n"
+        "def iso(t): return datetime.fromtimestamp(t, timezone.utc).isoformat()\n"
+        # Keep the reset identical between the baseline and subsequent report.
+        f"reset = {time.time() + 3600!r}\n"
+        "print(json.dumps([{'provider':'claude', 'usage': {\n"
+        "'updatedAt': iso(time.time()),\n"
+        f"'accountEmail': {second_email!r} if second else 'test@example.invalid',\n"
+        f"'secondary': {{'usedPercent': {second_used} if second else 40,\n"
+        "'windowMinutes':10080, 'resetsAt':iso(reset)}}}]))\n"
+    )
+    reader.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    budget = arm(store, {"usage": [{"max_additional_percent": 10}]}, [workers()])
+    until(lambda: store.get(budget["id"])["state"] == "stopped")
+    assert reason in store.get(budget["id"])["reason"]

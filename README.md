@@ -35,11 +35,9 @@ Restart Claude, then:
 
 ```sh
 codex plugin marketplace add michael-L-i/agent-budget
-codex plugin add agent-budget@personal
+codex plugin add agent-budget@agent-budget
 ```
 
-The Codex marketplace currently uses the scaffold's `personal` name. If you already
-have a marketplace with that name, use the local skill option below instead.
 Restart Codex, review/trust the plugin's session-registration hook when prompted,
 then invoke `$budget` and describe your limit. The CLI helper still registers the
 current session when setting a budget if the optional startup hook is disabled.
