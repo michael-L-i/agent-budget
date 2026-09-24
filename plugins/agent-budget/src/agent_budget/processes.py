@@ -48,6 +48,8 @@ def current() -> dict:
         try:
             provider = provider_for(proc.exe(), proc.cmdline())
             if provider is None:
+                if Path(proc.exe()).name in ("claude", "codex"):
+                    raise BudgetError("This agent is a shared or remote host, not a supported CLI.")
                 continue
             born = proc.create_time()
             return {
@@ -56,12 +58,36 @@ def current() -> dict:
                 "born": born,
                 "provider": provider,
                 "cwd": proc.cwd(),
+                "quota_eligible": quota_eligible(provider, proc.environ(), proc.cmdline()),
             }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     raise BudgetError(
         "No supported Claude/Codex terminal session found. Run /budget inside a CLI session; "
         "desktop app servers and arbitrary PIDs are not supported."
+    )
+
+
+def quota_eligible(provider: str, env: dict, argv: list[str]) -> bool:
+    """The first release supports the default local subscription profile only."""
+    keys = (
+        (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        )
+        if provider == "claude"
+        else ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME")
+    )
+    overrides = {"--settings", "--setting-sources", "--profile", "-p", "-c", "--config"}
+    if provider == "claude":
+        overrides -= {"-p", "-c"}
+    return not any(env.get(key) for key in keys) and not any(
+        arg.split("=", 1)[0] in overrides for arg in argv[1:]
     )
 
 
@@ -105,6 +131,7 @@ def stop_targets(targets: list[dict], grace: float = 3) -> list[str]:
         except psutil.AccessDenied:
             errors.append(f"Permission denied stopping process {proc.pid}.")
     _, alive = psutil.wait_procs(list(victims.values()), timeout=grace)
+    alive = [proc for proc in alive if _running(proc)]
     for proc in alive:
         try:
             proc.kill()
@@ -113,6 +140,13 @@ def stop_targets(targets: list[dict], grace: float = 3) -> list[str]:
         except psutil.AccessDenied:
             errors.append(f"Permission denied killing process {proc.pid}.")
     _, remaining = psutil.wait_procs(alive, timeout=1)
-    if remaining:
+    if any(_running(proc) for proc in remaining):
         errors.append("Some local processes have not exited; inspect them manually.")
     return errors
+
+
+def _running(proc: psutil.Process) -> bool:
+    try:
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
